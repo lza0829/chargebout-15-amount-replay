@@ -1,6 +1,14 @@
 from __future__ import annotations
+
 from fastapi import HTTPException
 
+from app.db import WriteBusy
+from app.services.amount import (
+    AMOUNT_ALGORITHM,
+    amounts_match,
+    replay_settle_amount,
+)
+from app.services.audit import record_audit, record_rejected_audit
 from app.services.core import current_band_price, get_setting, is_day_sealed, now_str, today
 
 
@@ -83,40 +91,98 @@ def add_pulse(conn, session_id: int, delta_kwh: float, power_kw: float = 0) -> d
         "INSERT INTO pulses(session_id,delta_kwh,power_kw,created_at) VALUES(?,?,?,?)",
         (session_id, delta_kwh, power_kw, ts),
     )
-    new_kwh = float(se["kwh"]) + float(delta_kwh)
+    new_kwh = round(float(se["kwh"]) + float(delta_kwh), 3)
+    # 预估列与关账共用唯一口径函数；预估仅供浏览，但任何时刻都应与重放值一致。
     price = float(se["price_locked"] or current_band_price(conn, se["rate_plan_id"]))
-    amount = round(new_kwh * price, 2)
+    estimate = replay_settle_amount(new_kwh, price)
     conn.execute(
         "UPDATE sessions SET kwh=?, amount=? WHERE id=?",
-        (round(new_kwh, 3), amount, session_id),
+        (new_kwh, estimate, session_id),
     )
     conn.execute(
         "INSERT INTO session_events(session_id,action,created_at,note) VALUES(?,?,?,?)",
         (session_id, "脉冲", ts, f"+{delta_kwh}"),
     )
-    return {"会话编号": session_id, "累计电量": round(new_kwh, 3), "预估金额": amount}
+    return {"会话编号": session_id, "累计电量": new_kwh, "预估金额": estimate}
 
 
 def settle(conn, session_id: int) -> dict:
+    """结算关账——全系统唯一的关账落账写口（Arm B：关账瞬间重算为准）。
+
+    调用方必须以 db(immediate=True) 提供已持有写锁的连接，本函数在该
+    事务内完成：状态校验 → 重放重算 → 预估列对账 → 状态/金额/桩枪/事件/
+    审计同刷。预估列与重放对不上则整笔失败，绝不带着分叉金额关账；
+    并发抢锁在进入事务前就被 db() 拦成 WriteBusy(409)，无双终态。
+    """
     se = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
     if not se:
         raise HTTPException(404, detail="会话不存在")
     if se["status"] not in ("充电中", "结算中", "已超时"):
         raise HTTPException(400, detail=f"会话状态为{se['status']}，不可关账")
-    ts = now_str()
+
+    kwh = float(se["kwh"])
     price = float(se["price_locked"] or current_band_price(conn, se["rate_plan_id"]))
-    amount = round(float(se["kwh"]) * price, 2)
-    conn.execute(
-        "UPDATE sessions SET status='已关账', amount=?, closed_at=?, price_locked=? WHERE id=?",
-        (amount, ts, price, session_id),
+    shown = float(se["amount"])
+    # 关账金额当场重算：忽略预估列展示值，只听锁定电价 × 累计电量。
+    replay = replay_settle_amount(kwh, price)
+
+    # 预估列与重放对不上 → 旁路改预估或异算法污染，整笔失败、不留终态。
+    if not amounts_match(shown, replay):
+        note = f"预估列{shown}与重放金额{replay}口径分叉，拒绝关账（以重算为准）"
+        conn.rollback()
+        record_rejected_audit(
+            session_id=session_id,
+            event="关账拒绝",
+            shown_amount=shown,
+            replay_amount=replay,
+            kwh=kwh,
+            price_locked=price,
+            note=note,
+        )
+        raise HTTPException(400, detail=note)
+
+    ts = now_str()
+    # 状态与金额同事务联动写入，带状态守卫：并发下最多一笔能改成已关账，
+    # 金额与状态不可能半截分叉，也不可能出现双终态。
+    cur = conn.execute(
+        """UPDATE sessions
+           SET status='已关账', amount=?, settle_amount=?, amount_algorithm=?,
+               closed_at=?, price_locked=?
+           WHERE id=? AND status IN ('充电中','结算中','已超时')""",
+        (replay, replay, AMOUNT_ALGORITHM, ts, price, session_id),
     )
+    if cur.rowcount != 1:
+        raise WriteBusy("会话终态已被并发写口改变，本笔回滚")
     conn.execute("UPDATE piles SET status='空闲' WHERE id=?", (se["pile_id"],))
     conn.execute("UPDATE guns SET status='可用' WHERE id=?", (se["gun_id"],))
     conn.execute(
         "INSERT INTO session_events(session_id,action,created_at,note) VALUES(?,?,?,?)",
-        (session_id, "结算关账", ts, f"金额{amount}"),
+        (session_id, "结算关账", ts, f"金额{replay}（重算口径{AMOUNT_ALGORITHM}）"),
     )
-    return {"会话编号": session_id, "电量": float(se["kwh"]), "金额": amount, "状态": "已关账"}
+    record_audit(
+        conn,
+        session_id=session_id,
+        event="结算关账",
+        shown_amount=shown,
+        replay_amount=replay,
+        settled_amount=replay,
+        kwh=kwh,
+        price_locked=price,
+        result="成功",
+        note=f"预估列{shown}与重放一致，原样落账{replay}",
+    )
+    return {
+        "会话编号": session_id,
+        "会话号": se["slip_no"],
+        "电量": kwh,
+        "锁定电价": price,
+        "预估金额": replay,
+        "重放金额": replay,
+        "金额": replay,
+        "关账金额": replay,
+        "算法": AMOUNT_ALGORITHM,
+        "状态": "已关账",
+    }
 
 
 def mark_timeout(conn, session_id: int) -> dict:

@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.db import db, row_dict, rows
+from app.services.amount import round2
 
 
 def now_str() -> str:
@@ -50,8 +51,11 @@ def overview(conn) -> dict:
     open_kwh = conn.execute(
         "SELECT COALESCE(SUM(kwh),0) AS k FROM sessions WHERE status IN ('充电中','结算中')"
     ).fetchone()["k"]
+    # 本日关账合计只认关账落账值 settle_amount，与关账回执同源，
+    # 不重新套公式，避免总览与回执长期拧花。
     today_amount = conn.execute(
-        "SELECT COALESCE(SUM(amount),0) AS a FROM sessions WHERE business_day=? AND status='已关账'",
+        "SELECT COALESCE(SUM(COALESCE(settle_amount,amount)),0) AS a "
+        "FROM sessions WHERE business_day=? AND status='已关账'",
         (today(),),
     ).fetchone()["a"]
     return {
@@ -65,7 +69,7 @@ def overview(conn) -> dict:
         "已超时": sess_map.get("已超时", 0),
         "已中断": sess_map.get("已中断", 0),
         "在充电量": round(float(open_kwh), 3),
-        "本日关账金额": round(float(today_amount), 2),
+        "本日关账金额": round2(today_amount),
         "营业日": today(),
         "充日已封印": is_day_sealed(conn),
     }
@@ -162,4 +166,8 @@ def session_detail(conn, session_id: int):
     d = row_dict(se)
     d["脉冲"] = pulses
     d["事件"] = events
+    # 详情金额与关账落账同源：已关账会话同时回传落账值与算法标识，
+    # 让详情页、回执、总览可逐分核对，不留长期拧花空间。
+    d["关账金额"] = se["settle_amount"]
+    d["金额算法"] = se["amount_algorithm"]
     return d

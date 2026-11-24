@@ -35,6 +35,11 @@ export const api = {
   充日: () => req('/充日'),
   封印: (备注 = '') => req('/充日/封印', { method: 'POST', body: JSON.stringify({ 备注 }) }),
   解封: () => req('/充日/解封', { method: 'POST', body: '{}' }),
+  改档价: (id, body) =>
+    req(`/费率/${id}/档价`, { method: 'PUT', body: JSON.stringify(body) }),
+  金额审计: (会话编号) =>
+    req(会话编号 ? `/金额审计?会话编号=${会话编号}` : '/金额审计'),
+  审计巡检: () => req('/金额审计/巡检'),
   设置: () => req('/设置'),
   写设置: (body) => req('/设置', { method: 'POST', body: JSON.stringify(body) }),
   改桩态: (id, 状态) =>

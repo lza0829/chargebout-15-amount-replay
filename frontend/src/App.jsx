@@ -11,6 +11,7 @@ import Settle from './pages/Settle'
 import Timeout from './pages/Timeout'
 import DaySeal from './pages/DaySeal'
 import Settings from './pages/Settings'
+import Audit from './pages/Audit'
 
 const links = [
   ['/', '总览'],
@@ -23,6 +24,7 @@ const links = [
   ['/枪线', '枪线'],
   ['/站点', '站点'],
   ['/费率', '费率'],
+  ['/金额审计', '金额审计'],
   ['/充日', '充日封印'],
   ['/设置', '设置'],
 ]
@@ -55,6 +57,7 @@ export default function App() {
           <Route path="/枪线" element={<Guns />} />
           <Route path="/站点" element={<Sites />} />
           <Route path="/费率" element={<Rates />} />
+          <Route path="/金额审计" element={<Audit />} />
           <Route path="/充日" element={<DaySeal />} />
           <Route path="/设置" element={<Settings />} />
         </Routes>

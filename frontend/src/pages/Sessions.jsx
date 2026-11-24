@@ -53,7 +53,12 @@ export default function Sessions() {
             {detail.slip_no} · <span className={`tag ${detail.status}`}>{detail.status}</span>
           </h3>
           <p>
-            锁定电价 {detail.price_locked} · 电量 {detail.kwh} · 金额 {detail.amount}
+            锁定电价 {detail.price_locked} · 电量 {detail.kwh} · 预估金额 {detail.amount}
+            {detail.status === '已关账' && (
+              <>
+                {' '}· 关账金额 {detail.关账金额} · 口径 {detail.金额算法}
+              </>
+            )}
           </p>
           <h3>脉冲</h3>
           <table>

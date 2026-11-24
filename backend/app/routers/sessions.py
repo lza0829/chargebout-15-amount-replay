@@ -51,7 +51,8 @@ def add_pulse(session_id: int, body: PulseIn):
 
 @router.post("/会话/{session_id}/结算")
 def settle(session_id: int):
-    with db() as conn:
+    # 关账是唯一落账写口：进入即持写锁，与改档价/旁路写串行，失败整体回滚。
+    with db(immediate=True) as conn:
         return svc.settle(conn, session_id)
 
 
